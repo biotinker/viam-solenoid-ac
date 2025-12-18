@@ -6,14 +6,15 @@
   "description": "Modular switch component: solenoid",
   "applications": null,
   "markdown_link": "README.md",
-  "entrypoint": "dist/main",
+  "entrypoint": "./run.sh",
   "first_run": "",
   "build": {
     "build": "./build.sh",
     "setup": "./setup.sh",
-    "path": "dist/archive.tar.gz",
+    "path": "./module.tar.gz",
     "arch": [
       "linux/amd64",
+      "linux/arm32v7",
       "linux/arm64",
       "darwin/arm64",
       "windows/amd64"
