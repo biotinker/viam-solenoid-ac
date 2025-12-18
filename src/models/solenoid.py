@@ -23,7 +23,7 @@ class Solenoid(Switch, EasyResource):
         self.board: Optional[Board] = None
         self.control_pin: Optional[str] = None
         self.pwm_pin: Optional[str] = None
-        self.pwm_frequency: float = 60.0  # Default 60Hz
+        self.pwm_frequency: int = 60  # Default 60Hz
         self.position: int = 0  # 0 = off, 1 = on
 
     @classmethod
@@ -52,7 +52,7 @@ class Solenoid(Switch, EasyResource):
 
         # Get optional PWM frequency (defaults to 60Hz if not specified)
         if "pwm_frequency" in config.attributes.fields:
-            instance.pwm_frequency = config.attributes.fields["pwm_frequency"].number_value
+            instance.pwm_frequency = int(config.attributes.fields["pwm_frequency"].number_value)
 
         return instance
 
