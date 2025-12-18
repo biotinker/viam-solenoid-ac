@@ -4,6 +4,13 @@
   "visibility": "public",
   "url": "",
   "description": "Modular switch component: solenoid",
+  "models": [
+    {
+      "api": "rdk:component:switch",
+      "model": "biotinker:solenoid-ac:solenoid",
+      "markdown_link": "biotinker_solenoid-ac_solenoid.md"
+    }
+  ],
   "applications": null,
   "markdown_link": "README.md",
   "entrypoint": "./run.sh",
