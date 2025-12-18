@@ -1,6 +1,5 @@
 from typing import (Any, ClassVar, Dict, Final, List, Mapping, Optional,
                     Sequence, Tuple)
-import asyncio
 
 from typing_extensions import Self
 from viam.components.component_base import ComponentBase
@@ -22,10 +21,10 @@ class Solenoid(Switch, EasyResource):
     def __init__(self, name: str):
         super().__init__(name)
         self.board: Optional[Board] = None
-        self.pin1: Optional[str] = None
-        self.pin2: Optional[str] = None
+        self.control_pin: Optional[str] = None
+        self.pwm_pin: Optional[str] = None
+        self.pwm_frequency: float = 60.0  # Default 60Hz
         self.position: int = 0  # 0 = off, 1 = on
-        self.alternating_task: Optional[asyncio.Task] = None
 
     @classmethod
     def new(
@@ -48,8 +47,12 @@ class Solenoid(Switch, EasyResource):
         instance.board = dependencies[Board.get_resource_name(board_name)]
 
         # Get pin numbers from config
-        instance.pin1 = config.attributes.fields["pin1"].string_value
-        instance.pin2 = config.attributes.fields["pin2"].string_value
+        instance.control_pin = config.attributes.fields["control_pin"].string_value
+        instance.pwm_pin = config.attributes.fields["pwm_pin"].string_value
+
+        # Get optional PWM frequency (defaults to 60Hz if not specified)
+        if "pwm_frequency" in config.attributes.fields:
+            instance.pwm_frequency = config.attributes.fields["pwm_frequency"].number_value
 
         return instance
 
@@ -70,15 +73,20 @@ class Solenoid(Switch, EasyResource):
         """
         # Validate required fields
         board_name = config.attributes.fields.get("board")
-        pin1 = config.attributes.fields.get("pin1")
-        pin2 = config.attributes.fields.get("pin2")
+        control_pin = config.attributes.fields.get("control_pin")
+        pwm_pin = config.attributes.fields.get("pwm_pin")
 
         if not board_name or not board_name.string_value:
             raise ValueError("'board' attribute is required in config")
-        if not pin1 or not pin1.string_value:
-            raise ValueError("'pin1' attribute is required in config")
-        if not pin2 or not pin2.string_value:
-            raise ValueError("'pin2' attribute is required in config")
+        if not control_pin or not control_pin.string_value:
+            raise ValueError("'control_pin' attribute is required in config")
+        if not pwm_pin or not pwm_pin.string_value:
+            raise ValueError("'pwm_pin' attribute is required in config")
+
+        # Validate optional pwm_frequency if provided
+        pwm_frequency = config.attributes.fields.get("pwm_frequency")
+        if pwm_frequency and pwm_frequency.number_value <= 0:
+            raise ValueError("'pwm_frequency' must be greater than 0")
 
         # Return board as a required dependency
         return [board_name.string_value], []
@@ -107,50 +115,18 @@ class Solenoid(Switch, EasyResource):
 
         self.position = position
 
-        # Stop existing alternating task if running
-        if self.alternating_task and not self.alternating_task.done():
-            self.alternating_task.cancel()
-            try:
-                await self.alternating_task
-            except asyncio.CancelledError:
-                pass
+        control_gpio = await self.board.gpio_pin_by_name(self.control_pin)
+        pwm_gpio = await self.board.gpio_pin_by_name(self.pwm_pin)
 
         if position == 0:
-            # Both pins low
-            pin1_gpio = await self.board.gpio_pin_by_name(self.pin1)
-            pin2_gpio = await self.board.gpio_pin_by_name(self.pin2)
-            await pin1_gpio.set(False)
-            await pin2_gpio.set(False)
+            # control_pin LOW, pwm_pin LOW
+            await control_gpio.set(False)
+            await pwm_gpio.set_pwm(0.0)
         else:
-            # Start alternating at 60Hz
-            self.alternating_task = asyncio.create_task(self._alternate_pins())
-
-    async def _alternate_pins(self):
-        """Alternates the two GPIO pins at 60Hz (each pin high for 1/120 sec)"""
-        pin1_gpio = await self.board.gpio_pin_by_name(self.pin1)
-        pin2_gpio = await self.board.gpio_pin_by_name(self.pin2)
-
-        # 60Hz means 60 cycles per second
-        # Each cycle: pin1 high, then pin2 high
-        # So each pin is high for 1/120 seconds (~8.33ms)
-        period = 1.0 / 120.0  # Time each pin stays high
-
-        try:
-            while True:
-                # Pin 1 high, Pin 2 low
-                await pin1_gpio.set(True)
-                await pin2_gpio.set(False)
-                await asyncio.sleep(period)
-
-                # Pin 1 low, Pin 2 high
-                await pin1_gpio.set(False)
-                await pin2_gpio.set(True)
-                await asyncio.sleep(period)
-        except asyncio.CancelledError:
-            # Ensure both pins are low when cancelled
-            await pin1_gpio.set(False)
-            await pin2_gpio.set(False)
-            raise
+            # control_pin HIGH, pwm_pin PWM at 50% duty cycle
+            await control_gpio.set(True)
+            await pwm_gpio.set_pwm_frequency(self.pwm_frequency)
+            await pwm_gpio.set_pwm(0.5)  # 50% duty cycle
 
     async def get_number_of_positions(
         self,
@@ -164,21 +140,13 @@ class Solenoid(Switch, EasyResource):
 
     async def close(self):
         """Cleanup when the component is closed"""
-        # Stop the alternating task and set both pins low
-        if self.alternating_task and not self.alternating_task.done():
-            self.alternating_task.cancel()
+        # Ensure both pins are low/off
+        if self.board and self.control_pin and self.pwm_pin:
             try:
-                await self.alternating_task
-            except asyncio.CancelledError:
-                pass
-
-        # Ensure both pins are low
-        if self.board and self.pin1 and self.pin2:
-            try:
-                pin1_gpio = await self.board.gpio_pin_by_name(self.pin1)
-                pin2_gpio = await self.board.gpio_pin_by_name(self.pin2)
-                await pin1_gpio.set(False)
-                await pin2_gpio.set(False)
+                control_gpio = await self.board.gpio_pin_by_name(self.control_pin)
+                pwm_gpio = await self.board.gpio_pin_by_name(self.pwm_pin)
+                await control_gpio.set(False)
+                await pwm_gpio.set_pwm(0.0)
             except Exception as e:
                 self.logger.error(f"Error setting pins low during close: {e}")
 

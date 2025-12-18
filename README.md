@@ -1,6 +1,6 @@
 # AC Solenoid Module
 
-This Viam module provides a Switch component for controlling AC solenoids using two GPIO pins that alternate at 60Hz.
+This Viam module provides a Switch component for controlling AC solenoids using a control pin and a PWM pin.
 
 ## Models
 
@@ -8,14 +8,16 @@ This module provides the following model:
 
 ### `biotinker:solenoid-ac:solenoid`
 
-A Switch component that controls an AC solenoid by alternating two GPIO pins at 60Hz when turned on.
+A Switch component that controls an AC solenoid using a control pin and a PWM-capable GPIO pin.
 
 #### Behavior
 
-- **Position 0 (Off)**: Both GPIO pins are set LOW
-- **Position 1 (On)**: The two GPIO pins alternate at 60Hz
-  - Each pin is HIGH for 1/120 second (~8.33ms)
-  - Creates 60 complete cycles per second for AC solenoid operation
+- **Position 0 (Off)**:
+  - `control_pin` is set LOW
+  - `pwm_pin` PWM duty cycle is set to 0% (effectively LOW)
+- **Position 1 (On)**:
+  - `control_pin` is set HIGH
+  - `pwm_pin` outputs PWM at 50% duty cycle at the configured frequency (default 60Hz)
 
 ## Configuration
 
@@ -31,8 +33,9 @@ Add this component to your robot configuration with the following attributes:
       "namespace": "rdk",
       "attributes": {
         "board": "local",
-        "pin1": "11",
-        "pin2": "13"
+        "control_pin": "11",
+        "pwm_pin": "13",
+        "pwm_frequency": 60
       },
       "depends_on": []
     }
@@ -42,19 +45,21 @@ Add this component to your robot configuration with the following attributes:
 
 ### Attributes
 
-| Attribute | Type   | Required | Description |
-|-----------|--------|----------|-------------|
-| `board`   | string | Yes      | Name of the Board component that provides GPIO pin access |
-| `pin1`    | string | Yes      | GPIO pin number for the first solenoid connection |
-| `pin2`    | string | Yes      | GPIO pin number for the second solenoid connection |
+| Attribute       | Type   | Required | Description |
+|-----------------|--------|----------|-------------|
+| `board`         | string | Yes      | Name of the Board component that provides GPIO pin access |
+| `control_pin`   | string | Yes      | GPIO pin number for the control signal (HIGH when on, LOW when off) |
+| `pwm_pin`       | string | Yes      | GPIO pin number for the PWM signal (must support PWM) |
+| `pwm_frequency` | number | No       | PWM frequency in Hz (default: 60) |
 
 ### Example
 
 ```json
 {
   "board": "local",
-  "pin1": "11",
-  "pin2": "13"
+  "control_pin": "11",
+  "pwm_pin": "13",
+  "pwm_frequency": 60
 }
 ```
 
@@ -62,9 +67,9 @@ Add this component to your robot configuration with the following attributes:
 
 Once configured, you can control the solenoid using the standard Viam Switch API:
 
-- `set_position(0)` - Turn off (both pins LOW)
-- `set_position(1)` - Turn on (pins alternate at 60Hz)
+- `set_position(0)` - Turn off (control_pin LOW, pwm_pin duty cycle 0%)
+- `set_position(1)` - Turn on (control_pin HIGH, pwm_pin PWM at 50% duty cycle)
 - `get_position()` - Get current state (0 or 1)
 - `get_number_of_positions()` - Returns 2
 
-The module automatically handles cleanup when the robot shuts down, ensuring both GPIO pins are set LOW.
+The module automatically handles cleanup when the robot shuts down, ensuring both GPIO pins are set LOW/off.
