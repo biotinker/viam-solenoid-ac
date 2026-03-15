@@ -18,13 +18,19 @@ class Solenoid(Switch, EasyResource):
     # or configure your resource/machine to display debug logs.
     MODEL: ClassVar[Model] = Model(ModelFamily("biotinker", "solenoid-ac"), "solenoid")
 
+    # Shared PWM state: one PWM pin drives all solenoids, keyed by "board_name:pin"
+    _active_pwm: ClassVar[Dict[str, int]] = {}  # key -> frequency in Hz
+    _instance_count: ClassVar[Dict[str, int]] = {}  # key -> instance count
+
     def __init__(self, name: str):
         super().__init__(name)
         self.board: Optional[Board] = None
+        self.board_name: Optional[str] = None
         self.control_pin: Optional[str] = None
         self.pwm_pin: Optional[str] = None
         self.pwm_frequency: int = 60  # Default 60Hz
         self.position: int = 0  # 0 = off, 1 = on
+        self._pwm_key: Optional[str] = None
 
     @classmethod
     def new(
@@ -45,6 +51,7 @@ class Solenoid(Switch, EasyResource):
         # Get board from dependencies
         board_name = config.attributes.fields["board"].string_value
         instance.board = dependencies[Board.get_resource_name(board_name)]
+        instance.board_name = board_name
 
         # Get pin numbers from config
         instance.control_pin = config.attributes.fields["control_pin"].string_value
@@ -53,6 +60,10 @@ class Solenoid(Switch, EasyResource):
         # Get optional PWM frequency (defaults to 60Hz if not specified)
         if "pwm_frequency" in config.attributes.fields:
             instance.pwm_frequency = int(config.attributes.fields["pwm_frequency"].number_value)
+
+        # Track this instance for the shared PWM pin
+        instance._pwm_key = f"{board_name}:{instance.pwm_pin}"
+        cls._instance_count[instance._pwm_key] = cls._instance_count.get(instance._pwm_key, 0) + 1
 
         return instance
 
@@ -91,6 +102,23 @@ class Solenoid(Switch, EasyResource):
         # Return board as a required dependency
         return [board_name.string_value], []
 
+    async def _ensure_pwm_started(self):
+        """Start the shared PWM signal if not already running for this pin."""
+        if self._pwm_key in Solenoid._active_pwm:
+            existing_freq = Solenoid._active_pwm[self._pwm_key]
+            if existing_freq != self.pwm_frequency:
+                raise ValueError(
+                    f"PWM pin {self.pwm_pin} is already running at {existing_freq}Hz, "
+                    f"but this solenoid requests {self.pwm_frequency}Hz. "
+                    f"All solenoids sharing a PWM pin must use the same frequency."
+                )
+            return
+        pwm_gpio = await self.board.gpio_pin_by_name(self.pwm_pin)
+        await pwm_gpio.set_pwm_frequency(self.pwm_frequency)
+        await pwm_gpio.set_pwm(0.5)  # 50% duty cycle
+        Solenoid._active_pwm[self._pwm_key] = self.pwm_frequency
+        self.logger.info(f"Started shared PWM at {self.pwm_frequency}Hz on pin {self.pwm_pin}")
+
     async def get_position(
         self,
         *,
@@ -113,20 +141,11 @@ class Solenoid(Switch, EasyResource):
         if position not in [0, 1]:
             raise ValueError(f"Position must be 0 or 1, got {position}")
 
+        await self._ensure_pwm_started()
+
         self.position = position
-
         control_gpio = await self.board.gpio_pin_by_name(self.control_pin)
-        pwm_gpio = await self.board.gpio_pin_by_name(self.pwm_pin)
-
-        if position == 0:
-            # control_pin LOW, pwm_pin LOW
-            await control_gpio.set(False)
-            await pwm_gpio.set_pwm(0.0)
-        else:
-            # control_pin HIGH, pwm_pin PWM at 50% duty cycle
-            await control_gpio.set(True)
-            await pwm_gpio.set_pwm_frequency(self.pwm_frequency)
-            await pwm_gpio.set_pwm(0.5)  # 50% duty cycle
+        await control_gpio.set(position == 1)
 
     async def get_number_of_positions(
         self,
@@ -140,15 +159,26 @@ class Solenoid(Switch, EasyResource):
 
     async def close(self):
         """Cleanup when the component is closed"""
-        # Ensure both pins are low/off
-        if self.board and self.control_pin and self.pwm_pin:
+        if self.board and self.control_pin:
             try:
                 control_gpio = await self.board.gpio_pin_by_name(self.control_pin)
-                pwm_gpio = await self.board.gpio_pin_by_name(self.pwm_pin)
                 await control_gpio.set(False)
-                await pwm_gpio.set_pwm(0.0)
             except Exception as e:
-                self.logger.error(f"Error setting pins low during close: {e}")
+                self.logger.error(f"Error setting control pin low during close: {e}")
+
+        # Decrement instance count; stop PWM only when last instance closes
+        if self._pwm_key:
+            Solenoid._instance_count[self._pwm_key] = Solenoid._instance_count.get(self._pwm_key, 1) - 1
+            if Solenoid._instance_count[self._pwm_key] <= 0:
+                try:
+                    if self.board and self.pwm_pin:
+                        pwm_gpio = await self.board.gpio_pin_by_name(self.pwm_pin)
+                        await pwm_gpio.set_pwm(0.0)
+                        self.logger.info(f"Stopped shared PWM on pin {self.pwm_pin}")
+                except Exception as e:
+                    self.logger.error(f"Error stopping PWM during close: {e}")
+                Solenoid._active_pwm.pop(self._pwm_key, None)
+                Solenoid._instance_count.pop(self._pwm_key, None)
 
     async def do_command(
         self,
